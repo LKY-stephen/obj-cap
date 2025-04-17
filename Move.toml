@@ -1,0 +1,8 @@
+[package]
+name = "obj_cap"
+edition = "2024.beta"
+
+[dependencies]
+
+[addresses]
+obj_cap = "0x0"
