@@ -1,7 +1,9 @@
 module obj_cap::fund;
 
+use std::type_name::{get, TypeName};
 use sui::balance::{Self, Balance};
 use sui::coin::{Self, Coin};
+use sui::dynamic_field::{add, borrow_mut, borrow};
 use sui::event;
 use sui::object::id;
 use sui::sui::SUI;
@@ -10,10 +12,10 @@ use sui::sui::SUI;
 const FundMismatch: vector<u8> = b"Fund Id are not mathching";
 
 #[error]
-const InsufficentShares: vector<u8> = b"Insufficent shares";
+const InsufficentSUI: vector<u8> = b"Insufficent SUI, Consider rebase portfolio first";
 
 #[error]
-const ZeroValue: vector<u8> = b"Value must be greater than zero";
+const InsufficientDeposit: vector<u8> = b"Value must be greater than minimum decreases";
 
 /// Event for withdrawal auditing
 public struct WithdrawEvent has copy, drop, store {
@@ -26,7 +28,8 @@ public struct WithdrawEvent has copy, drop, store {
 public struct Fund has key {
     id: UID,
     shares: u64,
-    balance: Balance<SUI>,
+    asset_lists: vector<TypeName>,
+    gas_reserve: u64,
 }
 
 /// A one-time-use capability to withdraw a fixed amount
@@ -37,10 +40,13 @@ public struct WithdrawCap has key, store {
 }
 
 /// Creates a new shared fund object with 0 balance
-public fun create(ctx: &mut TxContext): ID {
+entry fun create(gas_reserve: u64, ctx: &mut TxContext): ID {
     let id = object::new(ctx);
-    let balance = balance::zero<SUI>();
-    let fund = Fund { id, shares: 0, balance };
+    let asset_lists = vector::empty<TypeName>();
+
+    let mut fund = Fund { id, shares: 0, asset_lists, gas_reserve };
+    fund.add_asset_type<SUI>();
+
     let id = object::id(&fund);
     transfer::share_object(fund);
     id
@@ -48,13 +54,14 @@ public fun create(ctx: &mut TxContext): ID {
 
 /// Entry point: anyone can deposit SUI Coin into the fund
 entry fun deposit(fund: &mut Fund, coins: Coin<SUI>, ctx: &mut TxContext) {
-    assert!(coins.value() > 0, ZeroValue);
+    // minimum deposit requirement
+    assert!(coins.value() > fund.gas_reserve, InsufficientDeposit);
 
-    let balance = coin::into_balance(coins);
-    let cap = grant_withdraw_cap(fund, balance.value(), ctx);
-    fund.shares = fund.shares + balance.value();
-    fund.balance.join(balance);
-
+    let input = coin::into_balance(coins);
+    let cap = grant_withdraw_cap(fund, input.value(), ctx);
+    fund.shares = fund.shares + input.value();
+    let balance = borrow_mut<TypeName, Balance<SUI>>(&mut fund.id, get<SUI>());
+    balance.join(input);
     transfer::transfer(cap, ctx.sender());
 }
 
@@ -63,19 +70,28 @@ entry fun withdraw(fund: &mut Fund, cap: WithdrawCap, recipient: address, ctx: &
     // Cap must be unused
     assert!(cap.fund_id==id(fund), FundMismatch); // Cap must match fund
 
-    assert!(cap.amount > 0, ZeroValue); // Cap must be non-zero
-    assert!(cap.amount <= fund.shares, InsufficentShares);
+    let total_shares = fund.shares;
+    let gas_reserve = fund.gas_reserve;
+
+    let sui_balance = update_existed_balance<SUI>(fund);
+    let immediate_withdrawal = (sui_balance.value()*cap.amount)/total_shares;
+
+    // Cap must be non-zero
+    if (cap.amount < total_shares) {
+        assert!(immediate_withdrawal <= sui_balance.value() - gas_reserve, InsufficentSUI);
+    };
 
     let WithdrawCap { id, fund_id, amount } = cap;
 
-    let returned = (fund.balance.value()*amount).divide_and_round_up(fund.shares);
-
-    let coin = fund.balance.split(returned).into_coin(ctx);
+    // immediately withraw sui balance
+    transfer::public_transfer(
+        sui_balance.split(immediate_withdrawal).into_coin(ctx),
+        recipient,
+    );
 
     fund.shares = fund.shares - amount;
 
-    transfer::public_transfer(coin, recipient);
-
+    // trigger following liquidation through events
     event::emit(WithdrawEvent {
         fund_id,
         amount: amount,
@@ -96,13 +112,27 @@ fun grant_withdraw_cap(fund: &Fund, amount: u64, ctx: &mut TxContext): WithdrawC
 }
 
 /// Returns the fund balance
-public fun get_fund_balance(fund: &Fund): u64 {
-    fund.balance.value()
+public fun get_fund_total_shares(fund: &Fund): u64 {
+    fund.shares
 }
 
-#[test_only]
-public fun get_fund_shares(fund: &Fund): u64 {
-    fund.shares
+public fun get_existed_balance<T>(fund: &Fund): u64 {
+    assert!(fund.asset_lists.contains(&get<T>()), FundMismatch);
+    borrow<TypeName, Balance<T>>(&fund.id, get<T>()).value()
+}
+
+fun add_asset_type<T>(fund: &mut Fund) {
+    let name = get<T>();
+    if (fund.asset_lists.contains(&name)) {
+        return
+    };
+    fund.asset_lists.push_back(name);
+    add(&mut fund.id, get<T>(), balance::zero<T>());
+}
+
+fun update_existed_balance<T>(fund: &mut Fund): &mut Balance<T> {
+    assert!(fund.asset_lists.contains(&get<T>()), FundMismatch);
+    borrow_mut<TypeName, Balance<T>>(&mut fund.id, get<T>())
 }
 
 #[test_only]
