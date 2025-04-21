@@ -34,7 +34,6 @@ public struct WithdrawCap has key, store {
     id: UID,
     fund_id: ID,
     amount: u64,
-    recipient: address,
 }
 
 /// Creates a new shared fund object with 0 balance
@@ -51,24 +50,23 @@ public fun create(ctx: &mut TxContext): ID {
 entry fun deposit(fund: &mut Fund, coins: Coin<SUI>, ctx: &mut TxContext) {
     assert!(coins.value() > 0, ZeroValue);
 
-    let depositer = ctx.sender();
     let balance = coin::into_balance(coins);
-    let cap = grant_withdraw_cap(fund, balance.value(), depositer, ctx);
+    let cap = grant_withdraw_cap(fund, balance.value(), ctx);
     fund.shares = fund.shares + balance.value();
     fund.balance.join(balance);
 
-    transfer::transfer(cap, depositer);
+    transfer::transfer(cap, ctx.sender());
 }
 
 /// Withdraw Coin<SUI> using a one-time WithdrawCap
-entry fun withdraw(fund: &mut Fund, cap: WithdrawCap, ctx: &mut TxContext) {
+entry fun withdraw(fund: &mut Fund, cap: WithdrawCap, recipient: address, ctx: &mut TxContext) {
     // Cap must be unused
     assert!(cap.fund_id==id(fund), FundMismatch); // Cap must match fund
 
     assert!(cap.amount > 0, ZeroValue); // Cap must be non-zero
     assert!(cap.amount <= fund.shares, InsufficentShares);
 
-    let WithdrawCap { id, fund_id, amount, recipient } = cap;
+    let WithdrawCap { id, fund_id, amount } = cap;
 
     let returned = (fund.balance.value()*amount).divide_and_round_up(fund.shares);
 
@@ -89,21 +87,30 @@ entry fun withdraw(fund: &mut Fund, cap: WithdrawCap, ctx: &mut TxContext) {
 }
 
 /// Internal call to grant a capability — intended to be used only by trusted modules
-fun grant_withdraw_cap(
-    fund: &Fund,
-    amount: u64,
-    recipient: address,
-    ctx: &mut TxContext,
-): WithdrawCap {
+fun grant_withdraw_cap(fund: &Fund, amount: u64, ctx: &mut TxContext): WithdrawCap {
     WithdrawCap {
         id: object::new(ctx),
         fund_id: id(fund),
         amount,
-        recipient,
     }
 }
 
 /// Returns the fund balance
-public fun balance(fund: &Fund): u64 {
+public fun get_fund_balance(fund: &Fund): u64 {
     fund.balance.value()
+}
+
+#[test_only]
+public fun get_fund_shares(fund: &Fund): u64 {
+    fund.shares
+}
+
+#[test_only]
+public fun get_withdraw_cap_amount(cap: &WithdrawCap): u64 {
+    cap.amount
+}
+
+#[test_only]
+public fun get_withdraw_cap_fund_id(cap: &WithdrawCap): ID {
+    cap.fund_id
 }

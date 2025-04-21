@@ -1,6 +1,13 @@
 module obj_cap::fund_tests;
 
-use obj_cap::fund::{Self, WithdrawCap};
+use obj_cap::fund::{
+    Self,
+    WithdrawCap,
+    get_fund_balance,
+    get_fund_shares,
+    get_withdraw_cap_amount,
+    get_withdraw_cap_fund_id
+};
 use sui::balance::destroy_for_testing;
 use sui::coin::{mint_for_testing, Coin, value};
 use sui::sui::SUI;
@@ -36,18 +43,22 @@ fun test_deposit_and_withdraw() {
     fund::deposit(&mut fund, coin_to_deposit, ts.ctx());
 
     // Check Fund State
-    assert_eq(fund::balance(&fund), deposit_amount);
+    assert_eq(get_fund_balance(&fund), deposit_amount);
+    assert_eq(get_fund_shares(&fund), deposit_amount);
 
     // Bob Withdraws
     // WithdrawCap was transferred to Bob during deposit
 
     ts.next_tx(BOB);
     let cap = take_withdraw_cap(&ts);
+    assert_eq(get_withdraw_cap_amount(&cap), deposit_amount);
+    assert_eq(get_withdraw_cap_fund_id(&cap), fund_id);
 
-    fund::withdraw(&mut fund, cap, ts.ctx());
+    fund::withdraw(&mut fund, cap, BOB, ts.ctx());
 
     // Check Final Fund State
-    assert_eq(fund::balance(&fund), 0);
+    assert_eq(get_fund_balance(&fund), 0);
+    assert_eq(get_fund_shares(&fund), 0);
 
     ts::return_shared(fund);
 
@@ -84,32 +95,36 @@ fun test_multiple_deposits_and_withdrawals() {
     ts.next_tx(ALICE);
     let mut fund = ts.take_shared_by_id(fund_id);
     fund::deposit(&mut fund, coin_alice, ts.ctx());
-    assert_eq(fund::balance(&fund), deposit_alice);
+    assert_eq(get_fund_balance(&fund), deposit_alice);
+    assert_eq(get_fund_shares(&fund), deposit_alice);
 
     // Bob Deposits
     ts.next_tx(BOB);
     let coin_to_deposit_bob = ts.take_from_sender<Coin<SUI>>();
     fund::deposit(&mut fund, coin_to_deposit_bob, ts.ctx());
-    assert_eq(fund::balance(&fund), total_deposit);
+    assert_eq(get_fund_balance(&fund), total_deposit);
+    assert_eq(get_fund_shares(&fund), total_deposit);
 
     // Alice Withdraws
     ts.next_tx(ALICE);
     let cap_alice = take_withdraw_cap(&ts);
-    fund::withdraw(&mut fund, cap_alice, ts.ctx());
+    fund::withdraw(&mut fund, cap_alice, ALICE, ts.ctx());
 
     let summary = ts.next_tx(BOB);
     assert_eq(summary.num_user_events(), 1);
     // Check state after Alice's withdrawal
-    assert_eq(fund::balance(&fund), deposit_bob);
+    assert_eq(get_fund_balance(&fund), deposit_bob);
+    assert_eq(get_fund_shares(&fund), deposit_bob);
 
     // Bob Withdraws
     let cap_bob = take_withdraw_cap(&ts);
-    fund::withdraw(&mut fund, cap_bob, ts.ctx());
+    fund::withdraw(&mut fund, cap_bob, BOB, ts.ctx());
 
     let summary = ts.next_tx(BOB);
     assert_eq(summary.num_user_events(), 1);
     // Check final state
-    assert_eq(fund::balance(&fund), 0);
+    assert_eq(get_fund_balance(&fund), 0);
+    assert_eq(get_fund_shares(&fund), 0);
 
     ts::return_shared(fund);
 
@@ -150,10 +165,12 @@ fun test_withdraw_with_wrong_fund_cap() {
     ts.next_tx(ALICE);
     // Alice takes the cap (Cap A) meant for Fund A
     let cap_a = take_withdraw_cap(&ts);
+    assert_eq(get_withdraw_cap_fund_id(&cap_a), fund_a_id);
+    assert_eq(get_withdraw_cap_amount(&cap_a), deposit_amount);
 
     // Alice tries to withdraw from Fund B using Cap A
     let mut fund_b = ts.take_shared_by_id(fund_b_id);
-    fund::withdraw(&mut fund_b, cap_a, ts.ctx()); // This should fail
+    fund::withdraw(&mut fund_b, cap_a, ALICE, ts.ctx()); // This should fail
 
     // Cleanup (won't be reached on abort)
     ts::return_shared(fund_b);
@@ -205,7 +222,7 @@ fun test_cap_consumption() {
     let cap = take_withdraw_cap(&ts);
 
     // Bob Withdraws
-    fund::withdraw(&mut fund, cap, ts.ctx());
+    fund::withdraw(&mut fund, cap, BOB, ts.ctx());
     ts::return_shared(fund);
 
     // Bob should now have the withdrawn Coin, but NOT the WithdrawCap
